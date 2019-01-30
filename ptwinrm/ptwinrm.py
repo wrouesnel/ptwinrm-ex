@@ -11,6 +11,7 @@ Usage:
   winrm [--user=<user>]
         [--password=<password>]
         [--transport=<transport>]
+        [--encoding=<encoding>]
         [--run=<cmd>] <host>
 
 Options:
@@ -18,12 +19,14 @@ Options:
   --user=<user>            user name
   --password=<password>    password on the command line
   --transport=<transport>  [default: ntlm]. Valid: 'kerberos', 'ntlm'
+  --encoding=<encoding>    specify console encoding (defaults to stdout encoding)
   --run=<cmd>              command to execute (if not given, a console starts)
 """
 
 from __future__ import unicode_literals
 from __future__ import print_function
 
+import keyring
 import sys
 from functools import partial
 
@@ -40,12 +43,15 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.key_binding.manager import KeyBindingManager
 
+SERVICE_TMPL = "winrm:{host}"
+DEFAULT_USER_KEY = "__default_08723efe-242f-11e9-8143-7ff2638e4f3e"
 
 class WinRMConsole(object):
     """WinRM Console"""
 
-    def __init__(self, session):
+    def __init__(self, session, encoding):
         self.session = session
+        self.encoding = encoding
         self.multiline = False
 
     @property
@@ -76,11 +82,11 @@ class WinRMConsole(object):
         if result is None:
             return
         if result.status_code:
-            print('ERROR ({0}): {1}'.format(result.status_code, result.std_err))
+            print('ERROR ({0}): {1}'.format(result.status_code, result.std_err.decode(self.encoding)))
         else:
-            print(result.std_out)
+            print(result.std_out.decode(self.encoding))
             if result.std_err:
-                print('ERROR: {0}'.format(result.std_err))
+                print('ERROR: {0}'.format(result.std_err.decode(self.encoding)))
         return result
 
     def toggle_multiline(self):
@@ -89,7 +95,7 @@ class WinRMConsole(object):
 
     def get_prompt(self):
         r = self.run_cmd_line('cd')
-        return r.std_out.strip() + '>'
+        return r.std_out.strip().decode(self.encoding) + ">"
 
     def rep(self, cmd_line):
         result = self.run_cmd_line(cmd_line)
@@ -130,7 +136,8 @@ class WinRMConsole(object):
 
         try:
             prompt_msg = self.get_prompt()
-        except:
+        except Exception as e:
+            print("ERROR: {}".format(e))
             return
         while True:
             try:
@@ -145,13 +152,32 @@ class WinRMConsole(object):
 
 def main():
     opt = docopt(__doc__, help=True)
-    user = opt['--user'] or prompt('user: ')
-    password = opt['--password'] or prompt('password: ', is_password=True)
-    transport = opt['--transport']
     host = opt['<host>']
+    user = opt['--user']
+    password = opt['--password']
+    transport = opt['--transport']
+    encoding = opt["--encoding"] or sys.stdout.encoding
+
+    service_name = SERVICE_TMPL.format(host=host)
+
+    if user is None:
+        user = keyring.get_password(service_name, DEFAULT_USER_KEY)
+        if not user:
+            user = prompt("user: ")
+            keyring.set_password(service_name, DEFAULT_USER_KEY, user)
+            print("Saved new default user {} for host {}".format(user, host))
+        print("User from keyring: {}".format(user))
+
+    if password is None:
+        password = keyring.get_password(service_name, user)
+        if not password:
+            password = prompt('password: ', is_password=True)
+            keyring.set_password(service_name, user, password)
+            print("Saved new password for user {} for host {}".format(user, host))
+        print("Password for user from keyring")
 
     session = winrm.Session(host, (user, password), transport=transport)
-    console = WinRMConsole(session)
+    console = WinRMConsole(session,encoding=encoding)
 
     if opt['--run']:
         cmd_result = console.rep(opt['--run'])
